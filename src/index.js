@@ -1,96 +1,20 @@
 #!/usr/bin/env node
 
 import 'dotenv/config';
-
-//// Replace static SDK imports with a tolerant dynamic loader that logs available exports
-async function loadMcpAndStdio() {
-  // try server entrypoints (exports maps to dist/* so these should resolve)
-  const candidates = [
-    '@modelcontextprotocol/sdk/server/index.js',
-    '@modelcontextprotocol/sdk/dist/server/index.js'
-  ];
-  let serverModule = null;
-  for (const c of candidates) {
-    try {
-      serverModule = await import(c);
-      break;
-    } catch (e) {
-      // ignore and try next
-    }
-  }
-  if (!serverModule) {
-    throw new Error("Could not import the SDK server module. Check node_modules/@modelcontextprotocol/sdk/dist/server/");
-  }
-  console.error('SDK server exports:', Object.keys(serverModule));
-
-  // pick McpServer — try several likely export names (Server is used by this SDK)
-  const McpServer =
-    serverModule.McpServer ??
-    serverModule.Mcp ??
-    serverModule.Server ??
-    serverModule.default?.McpServer ??
-    serverModule.default?.Server ??
-    serverModule.default;
-
-  if (!McpServer) {
-    console.error('Full server module:', serverModule);
-    throw new Error("SDK server module does not expose McpServer/Server. See logs of available exports above.");
-  }
-
-  // load stdio transport (same candidate logic)
-  const stdioCandidates = [
-    '@modelcontextprotocol/sdk/server/stdio.js',
-    '@modelcontextprotocol/sdk/dist/server/stdio.js'
-  ];
-  let stdioModule = null;
-  for (const c of stdioCandidates) {
-    try {
-      stdioModule = await import(c);
-      break;
-    } catch (e) {}
-  }
-  if (!stdioModule) {
-    throw new Error("Could not import the SDK stdio transport module.");
-  }
-  console.error('SDK stdio exports:', Object.keys(stdioModule));
-
-  // pick a stdio transport from common names
-  const StdioServerTransport =
-    stdioModule.StdioServerTransport ??
-    stdioModule.Stdio ??
-    stdioModule.StdioTransport ??
-    stdioModule.default?.StdioServerTransport ??
-    stdioModule.default ??
-    null;
-
-  if (!StdioServerTransport) {
-    console.error('Full stdio module:', stdioModule);
-    throw new Error("SDK stdio module does not expose a Stdio transport. See logs above.");
-  }
-
-  return { McpServer, StdioServerTransport };
-}
-
-const { McpServer, StdioServerTransport } = await loadMcpAndStdio();
-
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const { MongoClient, ObjectId } = require("mongodb");
-import { z } from "zod";
 
 // Configuration
-const MONGODB_URI = process.env.MONGODB_URI;
-const DEFAULT_DATABASE = process.env.DEFAULT_DATABASE;
+const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017";
+const DEFAULT_DATABASE = process.env.DEFAULT_DATABASE || "testdb";
 
 // MongoDB client
 let mongoClient = null;
 let isConnected = false;
-
-// Validation schemas
-const DatabaseSchema = z.string().min(1);
-const CollectionSchema = z.string().min(1);
-const QuerySchema = z.record(z.any()).optional();
-const DocumentSchema = z.record(z.any());
 
 // Initialize MongoDB connection
 async function initMongoDB() {
@@ -145,244 +69,447 @@ function processMongoDocument(obj) {
   return obj;
 }
 
-// Create and configure the MCP server (robust instantiation)
-async function instantiateServer(ServerExport, options) {
-  console.error('Instantiating server, ServerExport type:', typeof ServerExport, 'name:', ServerExport?.name);
-
-  if (!ServerExport) {
-    throw new Error('No server export provided');
+// Create the server
+const server = new Server(
+  {
+    name: "mongodb-mcp-server",
+    version: "1.0.0",
+  },
+  {
+    capabilities: {
+      tools: {},
+    },
   }
+);
 
-  // helper to try constructing with a list of arguments
-  const tryConstruct = (args) => {
-    try {
-      const inst = Reflect.construct(ServerExport, args);
-      if (inst) {
-        console.error('Construct succeeded with args:', JSON.stringify(args.map(a => (typeof a === 'object' ? Object.keys(a || {}) : String(a)))),);
-        return inst;
-      }
-    } catch (e) {
-      console.error('Construct failed for args:', JSON.stringify(args.map(a => (typeof a === 'object' ? Object.keys(a || {}) : String(a)))), '->', e?.message);
-    }
-    return null;
+// List available tools
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return {
+    tools: [
+      {
+        name: "list_databases",
+        description: "List all databases in MongoDB",
+        inputSchema: {
+          type: "object",
+          properties: {},
+        },
+      },
+      {
+        name: "list_collections",
+        description: "List all collections in a database",
+        inputSchema: {
+          type: "object",
+          properties: {
+            database: {
+              type: "string",
+              description: "Database name",
+            },
+          },
+          required: ["database"],
+        },
+      },
+      {
+        name: "find_documents",
+        description: "Find documents in a collection",
+        inputSchema: {
+          type: "object",
+          properties: {
+            database: {
+              type: "string",
+              description: "Database name",
+            },
+            collection: {
+              type: "string",
+              description: "Collection name",
+            },
+            query: {
+              type: "object",
+              description: "MongoDB query filter",
+            },
+            limit: {
+              type: "number",
+              description: "Maximum number of documents to return",
+              default: 10,
+            },
+            skip: {
+              type: "number",
+              description: "Number of documents to skip",
+              default: 0,
+            },
+          },
+          required: ["database", "collection"],
+        },
+      },
+      {
+        name: "count_documents",
+        description: "Count documents in a collection",
+        inputSchema: {
+          type: "object",
+          properties: {
+            database: {
+              type: "string",
+              description: "Database name",
+            },
+            collection: {
+              type: "string",
+              description: "Collection name",
+            },
+            filter: {
+              type: "object",
+              description: "MongoDB query filter",
+            },
+          },
+          required: ["database", "collection"],
+        },
+      },
+      {
+        name: "insert_document",
+        description: "Insert a document into a collection",
+        inputSchema: {
+          type: "object",
+          properties: {
+            database: {
+              type: "string",
+              description: "Database name",
+            },
+            collection: {
+              type: "string",
+              description: "Collection name",
+            },
+            document: {
+              type: "object",
+              description: "Document to insert",
+            },
+          },
+          required: ["database", "collection", "document"],
+        },
+      },
+      {
+        name: "update_documents",
+        description: "Update documents in a collection",
+        inputSchema: {
+          type: "object",
+          properties: {
+            database: {
+              type: "string",
+              description: "Database name",
+            },
+            collection: {
+              type: "string",
+              description: "Collection name",
+            },
+            filter: {
+              type: "object",
+              description: "MongoDB query filter",
+            },
+            update: {
+              type: "object",
+              description: "MongoDB update operation",
+            },
+            updateMany: {
+              type: "boolean",
+              description: "Update multiple documents",
+              default: false,
+            },
+          },
+          required: ["database", "collection", "filter", "update"],
+        },
+      },
+      {
+        name: "delete_documents",
+        description: "Delete documents from a collection",
+        inputSchema: {
+          type: "object",
+          properties: {
+            database: {
+              type: "string",
+              description: "Database name",
+            },
+            collection: {
+              type: "string",
+              description: "Collection name",
+            },
+            filter: {
+              type: "object",
+              description: "MongoDB query filter to match documents to delete",
+            },
+            deleteMany: {
+              type: "boolean",
+              description: "Delete multiple documents (true) or just one (false)",
+              default: false,
+            },
+          },
+          required: ["database", "collection", "filter"],
+        },
+      },
+      {
+        name: "drop_collection",
+        description: "Drop (delete) an entire collection",
+        inputSchema: {
+          type: "object",
+          properties: {
+            database: {
+              type: "string",
+              description: "Database name",
+            },
+            collection: {
+              type: "string",
+              description: "Collection name to drop",
+            },
+          },
+          required: ["database", "collection"],
+        },
+      },
+    ],
   };
+});
 
-  // 1) If it's a function/class, try a number of constructor signatures
-  if (typeof ServerExport === 'function') {
-    // common argument variations to try
-    const argVariants = [
-      [options],
-      [{ ...options }],                  // shallow copy
-      [{ options }],                     // wrapped under "options"
-      [{ server: options }],             // wrapped under "server"
-      [{ capabilities: options?.capabilities ?? [] }], // only capabilities
-      [options, {}],                     // options + empty second arg
-      [],                                 // no-arg constructor
-    ];
+// Handle tool calls
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
 
-    for (const args of argVariants) {
-      const inst = tryConstruct(args);
-      if (inst) return inst;
-    }
-
-    // 2) try nested Server property (export may be a namespace)
-    try {
-      if (ServerExport.Server && typeof ServerExport.Server === 'function') {
-        try {
-          const inst = Reflect.construct(ServerExport.Server, [options]);
-          console.error('Constructed ServerExport.Server with options');
-          return inst;
-        } catch (e) {
-          console.error('new ServerExport.Server(options) failed:', e?.message);
-        }
-      }
-    } catch (e) {
-      console.error('Error accessing nested ServerExport.Server:', e?.message);
-    }
-
-    // 3) try common static factory methods
-    const factories = ['create', 'fromOptions', 'from', 'build'];
-    for (const name of factories) {
-      try {
-        if (typeof ServerExport[name] === 'function') {
-          console.error('Trying factory method:', name);
-          const created = await ServerExport[name](options);
-          if (created) return created;
-        }
-      } catch (e) {
-        console.error(`ServerExport.${name}(options) failed:`, e?.message);
-      }
-    }
-
-    // 4) try calling as function (non-class export)
-    try {
-      const maybe = ServerExport(options);
-      if (maybe) {
-        console.error('ServerExport(options) returned an instance (callable export).');
-        return maybe;
-      }
-    } catch (e) {
-      console.error('ServerExport(options) failed:', e?.message);
-    }
-  } else {
-    console.error('ServerExport is not a function; value:', ServerExport);
-  }
-
-  // Last-ditch: log the full export shape to help debugging
   try {
-    console.error('Unable to instantiate MCP Server. Server export keys:', Object.keys(ServerExport));
-    console.error('Full server export:', ServerExport);
-  } catch (e) {
-    console.error('Error while dumping server export:', e?.message);
-  }
-
-  throw new Error('Unable to instantiate MCP Server from SDK export. Inspect SDK exports and logs above.');
-}
-
-const serverOptions = {
-  name: "mongodb-mcp-server",
-  version: "1.0.0",
-  // Server implementation expects options.capabilities; provide empty array to start.
-  capabilities: []
-};
-
-const server = await instantiateServer(McpServer, serverOptions);
-
-// Register tools by adding request handlers directly
-server._requestHandlers.set(
-  "list_databases",
-  async () => {
     ensureConnection();
-    const adminDb = mongoClient.db().admin();
-    const databases = await adminDb.listDatabases();
+
+    switch (name) {
+      case "list_databases": {
+        const adminDb = mongoClient.db().admin();
+        const databases = await adminDb.listDatabases();
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(databases.databases, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "list_collections": {
+        if (!args.database || typeof args.database !== 'string') {
+          throw new Error("Database name is required and must be a string");
+        }
+        const db = mongoClient.db(args.database);
+        const collections = await db.listCollections().toArray();
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(collections, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "find_documents": {
+        if (!args.database || typeof args.database !== 'string') {
+          throw new Error("Database name is required and must be a string");
+        }
+        if (!args.collection || typeof args.collection !== 'string') {
+          throw new Error("Collection name is required and must be a string");
+        }
+        
+        const processedQuery = processMongoDocument(args.query || {});
+        const db = mongoClient.db(args.database);
+        const coll = db.collection(args.collection);
+        const documents = await coll
+          .find(processedQuery)
+          .skip(args.skip || 0)
+          .limit(args.limit || 10)
+          .toArray();
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(documents, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "count_documents": {
+        if (!args.database || typeof args.database !== 'string') {
+          throw new Error("Database name is required and must be a string");
+        }
+        if (!args.collection || typeof args.collection !== 'string') {
+          throw new Error("Collection name is required and must be a string");
+        }
+        
+        const processedFilter = processMongoDocument(args.filter || {});
+        const db = mongoClient.db(args.database);
+        const coll = db.collection(args.collection);
+        const count = await coll.countDocuments(processedFilter);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ count }, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "insert_document": {
+        console.error("Insert document called with args:", JSON.stringify(args, null, 2));
+        
+        if (!args.database || typeof args.database !== 'string') {
+          throw new Error("Database name is required and must be a string");
+        }
+        if (!args.collection || typeof args.collection !== 'string') {
+          throw new Error("Collection name is required and must be a string");
+        }
+        if (!args.document || typeof args.document !== 'object' || Array.isArray(args.document)) {
+          throw new Error("Document must be a valid object");
+        }
+        
+        const processedDoc = processMongoDocument(args.document);
+        console.error("Processed document:", JSON.stringify(processedDoc, null, 2));
+        
+        const db = mongoClient.db(args.database);
+        const coll = db.collection(args.collection);
+        const result = await coll.insertOne(processedDoc);
+        
+        console.error("Insert result:", JSON.stringify({
+          acknowledged: result.acknowledged,
+          insertedId: result.insertedId.toString(),
+        }, null, 2));
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                acknowledged: result.acknowledged,
+                insertedId: result.insertedId.toString(),
+                message: `Successfully inserted document into ${args.database}.${args.collection}`
+              }, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "update_documents": {
+        if (!args.database || typeof args.database !== 'string') {
+          throw new Error("Database name is required and must be a string");
+        }
+        if (!args.collection || typeof args.collection !== 'string') {
+          throw new Error("Collection name is required and must be a string");
+        }
+        if (!args.filter || typeof args.filter !== 'object') {
+          throw new Error("Filter must be a valid object");
+        }
+        if (!args.update || typeof args.update !== 'object') {
+          throw new Error("Update must be a valid object");
+        }
+        
+        const processedFilter = processMongoDocument(args.filter);
+        const processedUpdate = processMongoDocument(args.update);
+        const db = mongoClient.db(args.database);
+        const coll = db.collection(args.collection);
+        const result = args.updateMany 
+          ? await coll.updateMany(processedFilter, processedUpdate)
+          : await coll.updateOne(processedFilter, processedUpdate);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                acknowledged: result.acknowledged,
+                matchedCount: result.matchedCount,
+                modifiedCount: result.modifiedCount,
+                upsertedId: result.upsertedId?.toString(),
+              }, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "delete_documents": {
+        console.error("Delete documents called with args:", JSON.stringify(args, null, 2));
+        
+        if (!args.database || typeof args.database !== 'string') {
+          throw new Error("Database name is required and must be a string");
+        }
+        if (!args.collection || typeof args.collection !== 'string') {
+          throw new Error("Collection name is required and must be a string");
+        }
+        if (!args.filter || typeof args.filter !== 'object') {
+          throw new Error("Filter must be a valid object");
+        }
+        
+        const processedFilter = processMongoDocument(args.filter);
+        console.error("Processed filter:", JSON.stringify(processedFilter, null, 2));
+        
+        const db = mongoClient.db(args.database);
+        const coll = db.collection(args.collection);
+        
+        const result = args.deleteMany 
+          ? await coll.deleteMany(processedFilter)
+          : await coll.deleteOne(processedFilter);
+        
+        console.error("Delete result:", JSON.stringify({
+          acknowledged: result.acknowledged,
+          deletedCount: result.deletedCount,
+        }, null, 2));
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                acknowledged: result.acknowledged,
+                deletedCount: result.deletedCount,
+                message: `Successfully deleted ${result.deletedCount} document(s) from ${args.database}.${args.collection}`
+              }, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "drop_collection": {
+        console.error("Drop collection called with args:", JSON.stringify(args, null, 2));
+        
+        if (!args.database || typeof args.database !== 'string') {
+          throw new Error("Database name is required and must be a string");
+        }
+        if (!args.collection || typeof args.collection !== 'string') {
+          throw new Error("Collection name is required and must be a string");
+        }
+        
+        const db = mongoClient.db(args.database);
+        const result = await db.collection(args.collection).drop();
+        
+        console.error("Drop collection result:", result);
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: result,
+                message: `Successfully dropped collection ${args.collection} from database ${args.database}`
+              }, null, 2),
+            },
+          ],
+        };
+      }
+
+      default:
+        throw new Error(`Unknown tool: ${name}`);
+    }
+  } catch (error) {
+    console.error("Error in tool handler:", error);
     return {
       content: [
         {
           type: "text",
-          text: JSON.stringify(databases.databases, null, 2)
-        }
-      ]
+          text: `Error: ${error.message}`,
+        },
+      ],
+      isError: true,
     };
   }
-);
-
-server._requestHandlers.set(
-  "list_collections",
-  async ({ database }) => {
-    ensureConnection();
-    DatabaseSchema.parse(database);
-    const db = mongoClient.db(database);
-    const collections = await db.listCollections().toArray();
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(collections, null, 2)
-        }
-      ]
-    };
-  }
-);
-
-server._requestHandlers.set(
-  "find_documents",
-  async ({ database, collection, query = {}, limit = 10, skip = 0 }) => {
-    ensureConnection();
-    DatabaseSchema.parse(database);
-    CollectionSchema.parse(collection);
-    const processedQuery = processMongoDocument(query);
-    const db = mongoClient.db(database);
-    const coll = db.collection(collection);
-    const documents = await coll
-      .find(processedQuery)
-      .skip(skip)
-      .limit(limit)
-      .toArray();
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(documents, null, 2)
-        }
-      ]
-    };
-  }
-);
-
-server._requestHandlers.set(
-  "insert_document",
-  async ({ database, collection, document }) => {
-    ensureConnection();
-    DatabaseSchema.parse(database);
-    CollectionSchema.parse(collection);
-    DocumentSchema.parse(document);
-    const processedDoc = processMongoDocument(document);
-    const db = mongoClient.db(database);
-    const coll = db.collection(collection);
-    const result = await coll.insertOne(processedDoc);
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({
-            acknowledged: result.acknowledged,
-            insertedId: result.insertedId.toString()
-          }, null, 2)
-        }
-      ]
-    };
-  }
-);
-
-server._requestHandlers.set(
-  "update_documents",
-  async ({ database, collection, filter, update, updateMany = false }) => {
-    ensureConnection();
-    DatabaseSchema.parse(database);
-    CollectionSchema.parse(collection);
-    const processedFilter = processMongoDocument(filter);
-    const processedUpdate = processMongoDocument(update);
-    const db = mongoClient.db(database);
-    const coll = db.collection(collection);
-    const result = updateMany 
-      ? await coll.updateMany(processedFilter, processedUpdate)
-      : await coll.updateOne(processedFilter, processedUpdate);
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({
-            acknowledged: result.acknowledged,
-            matchedCount: result.matchedCount,
-            modifiedCount: result.modifiedCount,
-            upsertedId: result.upsertedId?.toString()
-          }, null, 2)
-        }
-      ]
-    };
-  }
-);
-
-server._requestHandlers.set(
-  "count_documents",
-  async ({ database, collection, filter = {} }) => {
-    ensureConnection();
-    DatabaseSchema.parse(database);
-    CollectionSchema.parse(collection);
-    const processedFilter = processMongoDocument(filter);
-    const db = mongoClient.db(database);
-    const coll = db.collection(collection);
-    const count = await coll.countDocuments(processedFilter);
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({ count }, null, 2)
-        }
-      ]
-    };
-  }
-);
+});
 
 // Start the server
 async function main() {
