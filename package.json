@@ -10,13 +10,21 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^0.5.0",
-    "mongodb": "^6.3.0",
-    "zod": "^3.22.4"
+    "dotenv": "^17.2.1",
+    "mongodb": "^6.18.0",
+    "zod": "^4.1.3"
   },
   "devDependencies": {
+    "@types/mongodb": "^4.0.6",
     "@types/node": "^20.0.0"
   },
-  "keywords": ["mcp", "mongodb", "claude", "ai", "database"],
+  "keywords": [
+    "mcp",
+    "mongodb",
+    "claude",
+    "ai",
+    "database"
+  ],
   "author": "Your Name",
   "license": "MIT"
 }
