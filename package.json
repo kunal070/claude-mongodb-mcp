@@ -1,0 +1,22 @@
+{
+  "name": "claude-mongodb-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for MongoDB integration with Claude",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.5.0",
+    "mongodb": "^6.3.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0"
+  },
+  "keywords": ["mcp", "mongodb", "claude", "ai", "database"],
+  "author": "Your Name",
+  "license": "MIT"
+}
